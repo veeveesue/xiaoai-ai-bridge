@@ -1,5 +1,6 @@
 // Independent POC; does not load the old market-query hook or print credentials.
 import { mkdirSync } from 'node:fs';
+import { RuntimeLog, RecoveringPoller, readHealth, failureKind } from './poc-runtime.mjs';
 import { loadSettings } from './poc-settings.mjs';
 import { createTurnRouter, claimsReminderExecution } from './poc-route.mjs';
 import { IssueStore, looksUnsupported, nativeText, tryRecordIssue } from './poc-issues.mjs';
@@ -15,7 +16,15 @@ const settings = loadSettings();
 const modelSettings = settings.model;
 mkdirSync(settings.cacheDir, { recursive: true, mode: 0o700 });
 process.chdir(settings.cacheDir);
-const output = console.log.bind(console);
+const stdout = console.log.bind(console);
+if (process.argv.includes('--status')) {
+  try { const health = readHealth(settings.dataDir); stdout(JSON.stringify(health, null, 2)); process.exit(health.healthy ? 0 : 1); }
+  catch { stdout('未找到可用健康状态，请检查服务是否启动。'); process.exit(1); }
+}
+const serviceMode = !process.argv.some(arg => ['--help', '--check-config', '--check-model', '--say', '--status'].includes(arg));
+const runtime = new RuntimeLog(settings.dataDir, { secrets: [settings.model.apiKey, settings.speaker.password, settings.speaker.passToken, settings.speaker.userId, settings.speaker.did], stdout: message => { if (!serviceMode || process.stdout.isTTY || process.env.POC_LOG_STDOUT === '1') stdout(message); } });
+runtime.healthEnabled = false;
+const output = message => runtime.message(message);
 // The legacy library can print authentication URLs. Keep its logs private.
 console.log = console.warn = console.error = console.debug = () => {};
 const { getMiNA, getMIoT } = await import('@mi-gpt/miot');
@@ -50,6 +59,7 @@ async function speak(text) {
 }
 
 async function ask(text, turn) {
+  try {
   const { baseURL: base, apiKey: key, model } = modelSettings;
   if (!key || !model) throw new Error('请配置 POC_API_KEY 和 POC_MODEL');
   const messages = [
@@ -64,7 +74,7 @@ async function ask(text, turn) {
     signal: turn ? AbortSignal.any([turn.signal, AbortSignal.timeout(25000)]) : AbortSignal.timeout(25000),
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(`模型接口 HTTP ${response.status} (${data.error?.code || 'unknown'})`);
+  if (!response.ok) throw Object.assign(new Error(`模型接口 HTTP ${response.status}`), { status: response.status });
   let answer = data.choices?.[0]?.message?.content?.trim();
   if (!answer) throw new Error('模型未返回文本');
   if (turn && !turn.current()) throw new DOMException('Superseded', 'AbortError');
@@ -72,14 +82,24 @@ async function ask(text, turn) {
     recordIssue('AI虚假执行承诺', { question: text, aiAnswer: answer }, '模型无提醒执行工具，却承诺创建或触发提醒；已拦截原回答。');
     answer = '提醒需要由原生小爱设置，以它的确认和实际响铃为准。我不能代替它承诺已经设置成功。';
   }
+  runtime.event('model_response', { characters: answer.length });
+  runtime.update({ lastModelAt: runtime.time() }, true);
   return answer;
+  } catch (error) {
+    if (error.name !== 'AbortError') {
+      runtime.event('model_failed', { kind: failureKind(error) });
+      runtime.update({ lastModelFailureAt: runtime.time(), lastModelFailureKind: failureKind(error) }, true);
+    }
+    throw error;
+  }
 }
 
 async function handleRecord(record, receivedAt, pollMs, task) {
   if (!task.current()) return;
   const text = record.query?.trim();
   if (!text) return;
-  output('收到：' + text);
+  runtime.event('question_received', { characters: text.length });
+  runtime.update({ lastRecordAt: runtime.time() }, true);
   if (/^(?:结束(?:连续)?对话|停止连续对话|退出连续对话|stop conversation|end conversation|goodbye)[。.!！]?$/i.test(text)) {
     continuous.stop();
     await miotClient.doAction(...settings.actions.tts, [silentReplacement]);
@@ -172,20 +192,21 @@ async function handleRecord(record, receivedAt, pollMs, task) {
       output('英语练习：已将AI的中文回复交原生静默翻译，仅播英文。');
     } else await speak(answer);
     if (!echo) commitAcceptedReply(history, task, text, answer);
-    output('已发送播报：' + answer);
+    runtime.event('playback_accepted', { kind: playback.kind, characters: answer.length });
+    runtime.update({ lastPlaybackAcceptedAt: runtime.time() }, true);
     if (!echo && continuous.enabled) {
       output('连续对话试验：按保守估时等待播报，然后主动唤醒；不是可靠的播放完成事件。');
       const result = await continuous.afterReply(answer, task, () => miotClient.doAction(...settings.actions.wake, []), playback.kind);
       output('连续对话试验：' + JSON.stringify(result));
       if (result.result === 'wake-failed') recordIssue('连续对话唤醒失败', turn, '接口未确认主动唤醒，已停止本次连续试验。');
     }
-  } catch (error) { if (task.current() && error.name !== 'AbortError') { output(error.message); recordIssue('调用或播报失败', turn, error.message); } }
+  } catch (error) { if (task.current() && error.name !== 'AbortError') { runtime.event('turn_failed', { kind: failureKind(error) }); recordIssue('调用或播报失败', turn, error.message); } }
 }
 
 try {
   const sayIndex = process.argv.indexOf('--say');
   if (process.argv.includes('--help')) {
-    output('npm start / npm run echo / npm run check / npm run check:model / npm run say -- "播报内容"');
+    output('npm start / npm run echo / npm run status / npm run check / npm run check:model / npm run say -- "播报内容"');
     output('配置目录：' + settings.configDir + '；数据目录：' + settings.dataDir);
     output('可用 POC_CONFIG_DIR、POC_DATA_DIR 指定位置；音箱参数在 speaker.json，模型参数在 model.json。');
   } else if (process.argv.includes('--check-config')) {
@@ -194,7 +215,8 @@ try {
     output(JSON.stringify({ speakerConfigured, modelConfigured, englishReplyMode, continuousTrial: settings.continuousTrial, actions: settings.actions }));
     if (!speakerConfigured || !modelConfigured) process.exitCode = 1;
   } else if (process.argv.includes('--check-model')) {
-    output(await ask('请只回复：AI连接成功。'));
+    await ask('请只回复：AI连接成功。');
+    output('模型连接成功。');
   } else if (sayIndex >= 0) {
     await speak(process.argv[sayIndex + 1] || '电脑主动播报测试成功。');
     output('播报指令已接受。');
@@ -202,29 +224,31 @@ try {
     if (!settings.speaker.did) throw new Error('请在本机 speaker.json 配置音箱 did，参考 speaker.example.json');
     const releaseLock = acquireServiceLock(`${issues.directory}/service.pid`);
     process.once('exit', releaseLock);
+    runtime.healthEnabled = true;
     if (!echo && (!modelSettings.apiKey || !modelSettings.model)) {
       throw new Error('未配置普通模型 API；可先用 --echo 验证语音回声链路');
     }
-    const mina = await getMiNA({ ...settings.speaker, debug: false, timeout: 10000 });
-    if (!mina) throw new Error('小米语音服务认证失败');
-    minaClient = mina;
-    miotClient = await getMIoT({ ...settings.speaker, debug: false, timeout: 10000 });
-    if (!miotClient) throw new Error('米家播报服务认证失败');
+    const poller = new RecoveringPoller({ log: runtime, connect: async () => {
+      const mina = await getMiNA({ ...settings.speaker, debug: false, timeout: 10000 });
+      const miot = mina && await getMIoT({ ...settings.speaker, debug: false, timeout: 10000 });
+      return { mina, miot };
+    } });
+    runtime.update({ status: 'starting' }, true);
+    runtime.event('service_start');
     // Skip historical conversations; process only speech after startup.
     let cursor = Date.now();
-    let failures = 0;
     output(echo ? '回声测试已启动：每次用“小爱同学”唤醒并提问。' : 'AI 对话已启动：每次用“小爱同学”唤醒并提问。');
     while (running) {
-      const pollStarted = performance.now();
-      try {
-        const data = await mina.getConversations({ limit: 10 });
+      const result = await poller.poll();
+      if (!running) break;
+      if (result.data) {
+        const { data, clients, pollMs } = result;
+        minaClient = clients.mina; miotClient = clients.miot;
         const receivedAt = Date.now();
-        const pollMs = Math.round(performance.now() - pollStarted);
-        if (!data?.records) throw new Error('对话记录获取失败');
-        failures = 0;
         for (const record of [...data.records].sort((a, b) => a.time - b.time)) {
           if (!running || record.time <= cursor) continue;
           cursor = record.time;
+          if (receivedAt - record.time > 60000) { runtime.event('stale_record_skipped'); continue; }
           if (internalCommands.consume(record)) {
             output('已跳过程序自发的翻译播报记录。');
             continue;
@@ -236,15 +260,21 @@ try {
             }
           });
         }
-      } catch (error) {
-        failures++;
-        if (failures === 1 || failures % 10 === 0) output(error.message);
       }
-      await delay(Math.min(500 * 2 ** Math.min(failures, 6), 30000));
+      await delay(result.delayMs);
     }
     await turns.drain();
   }
 } catch (error) {
-  output(error.message);
+  turns.stop();
+  await turns.drain();
+  runtime.event('service_failed', { kind: error.code === 'RESTART_REQUIRED' ? 'restart_required' : failureKind(error) });
+  if (!serviceMode) output(error.message);
+  runtime.update({ status: 'failed' }, true);
   process.exitCode = 1;
+} finally {
+  if (!process.argv.some(arg => ['--help', '--check-config', '--check-model', '--say'].includes(arg))) {
+    runtime.event('service_stop');
+    runtime.update({ status: process.exitCode ? 'failed' : 'stopped' }, true);
+  }
 }

@@ -11,7 +11,8 @@
     "check": "node poc.mjs --check-config",
     "check:model": "node poc.mjs --check-model",
     "echo": "node poc.mjs --echo",
-    "say": "node poc.mjs --say"
+    "say": "node poc.mjs --say",
+    "status": "node poc.mjs --status"
   },
   "engines": {
     "node": ">=22"
