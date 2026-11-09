@@ -1,0 +1,11 @@
+{
+  "did": "YOUR_SPEAKER_DEVICE_ID",
+  "userId": "YOUR_XIAOMI_NUMERIC_USER_ID",
+  "password": "",
+  "passToken": "",
+  "actions": {
+    "tts": [5, 3],
+    "wake": [5, 1],
+    "execute": [5, 4]
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "baseURL": "https://api.deepseek.com",
+  "apiKey": "YOUR_API_KEY",
+  "model": "deepseek-chat",
+  "englishReplyMode": "direct",
+  "continuousTrial": false
+}

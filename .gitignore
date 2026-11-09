@@ -1,0 +1,17 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.mi.json
+**/.mi.json
+speaker.json
+model.json
+legacy-config.js
+issues.json
+TODO.md
+review-state.json
+service.pid
+*.log
+device-cache/
+coverage/
+.DS_Store

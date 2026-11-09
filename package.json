@@ -1,0 +1,22 @@
+{
+  "name": "xiaoai-ai-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Experimental XiaoAI speaker bridge with AI conversation and native capability routing",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "start": "node poc.mjs",
+    "test": "node --test poc-*.test.mjs",
+    "check": "node poc.mjs --check-config",
+    "check:model": "node poc.mjs --check-model",
+    "echo": "node poc.mjs --echo",
+    "say": "node poc.mjs --say"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@mi-gpt/miot": "1.2.2"
+  }
+}
